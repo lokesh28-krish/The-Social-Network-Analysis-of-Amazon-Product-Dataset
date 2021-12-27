@@ -1,0 +1,475 @@
+---
+title: "The Social Network Analysis of Amazon Product Dataset"
+author: "Lokesh K 18BCE1239"
+date: "21/08/2021"
+output: html_document
+---
+
+## Data Cleaning
+
+#### Data Preparation
+
+```{r}
+# Loading Libraries
+
+library("igraph")
+library("data.table")
+library("sqldf")
+library("tidyr")
+library("dplyr")
+library("plyr")
+library("stringr")
+library("plotly")
+library("highcharter")
+options(highcharter.theme = hc_theme_smpl(tooltip = list(valueDecimals = 2)))
+library("networkD3")
+library("collapsibleTree") 
+```
+
+
+```{r}
+
+amazonmeta <- read.table("Dataset/amazon-meta.txt", sep = ",", quote = "")
+
+filteredRawData <- sqldf(
+    "select * from amazonmeta where trim(V1) like 'Id%' or trim(V1)like 'title%' or trim(V1) like 'reviews%' or trim(V1) like '%books%' or trim(V1) like 'salesrank%' or trim(V1) like 'group%'"
+  )
+
+rm(amazonmeta)
+```
+
+
+```{r}
+head(filteredRawData)
+```
+
+#### Splitting to get two columns
+
+```{r}
+filteredRawData1 <- separate(data = filteredRawData, col = V1, into = c("attribute", "Id"), sep = "Id:   ", extra = "merge")
+```
+
+```{r}
+head(filteredRawData1)
+```
+
+
+```{r}
+filteredRawData1$attribute <- ifelse(!is.na(filteredRawData1$Id), "Id", filteredRawData1$attribute)
+filteredRawData1 <- fill(filteredRawData1, Id)
+filteredRawData1 <- sqldf("select  trim(attribute) key ,trim(Id) Id from filteredRawData1")
+head(filteredRawData1)
+```
+
+
+#### Subsetting the product books
+
+```{r}
+books <- filteredRawData1[filteredRawData1$key == "group: Book", c(2)]
+
+filteredRawData1 <- filteredRawData1[filteredRawData1$Id %in% books, ]
+rm(books)
+```
+
+#### Extracting the categories
+
+```{r}
+category1 <- sqldf("select * from filteredRawData1 where key like '%books%' and key not like 'title: %'")
+category2 <- data.frame(str_split_fixed(category1$key, "]", 4))
+category3 <- data.frame(str_split_fixed(category2$X3, "\\[", 2))
+category4 <- cbind(category1, category3)
+```
+
+
+```{r}
+category4$category <- gsub("[^[:alnum:][:blank:]&/\\-\\']", "", category4$X1)
+category4$X2 <- as.integer(category4$X2)
+category5 <- category4[order(category4$Id, category4$X2, decreasing = TRUE), c("Id", "X2", "category")]
+category <- category5[!duplicated(category5$Id), c("Id", "category")]
+head(category)
+```
+
+
+```{r}
+cat_no <- ddply(category, "category", summarise, count = length(Id))
+cat_no$share <- round(cat_no$count * 100 / sum(cat_no$count), 4)
+```
+
+```{r}
+fig <- cat_no %>% plot_ly(labels = ~category, values = ~count)
+fig <- fig %>% add_pie(hole = 0.6)
+fig <- fig %>% layout(title = "Categories Shares",  showlegend = F,
+                      xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+                      yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+fig
+```
+
+```{r}
+filteredRawData2 <- sqldf("select * from filteredRawData1 where key like 'title:%' or key like 'reviews:%' or key like 'salesrank:%'" )
+  
+
+filteredRawData3 <- separate(data = filteredRawData2, col = "key", into = c("Key", "value"), sep = "\\:", extra = "merge")
+
+filteredRawData4 <- spread(filteredRawData3, Key, value)
+filteredRawData5 <- merge(filteredRawData4, category, by = "Id", all.x = T)
+head(filteredRawData5)
+```
+
+
+#### Extracting the average rating
+
+```{r}
+
+tempdata <- data.frame(str_split_fixed(filteredRawData5$reviews, ' ', 10))
+```
+
+
+```{r}
+filteredRawData5$averagerating <- tempdata$X10
+filteredRawData5$total <- tempdata$X3
+filteredRawData5$downloaded <- tempdata$X6
+```
+
+
+```{r}
+filteredRawData <-filteredRawData5[, c("Id", "title", "category", "salesrank", "downloaded", "total", "averagerating")]
+colnames(filteredRawData) <- c("NodeId","Title","Category","SalesRank","Downloads","Reviews","AverageRating")
+filteredRawData$SalesRank <- as.numeric(filteredRawData$SalesRank)
+filteredRawData$Category <- ifelse( filteredRawData$Category == "" | is.na(filteredRawData$Category), "Others", filteredRawData$Category)
+filteredRawData$NodeId <- as.numeric(filteredRawData$NodeId)
+head(filteredRawData)
+```
+
+
+```{r}
+hc <- hchart(
+  filteredRawData$SalesRank, 
+  color = "#B71C1C", name = "Weight"
+  )
+
+hc
+```
+
+
+```{r}
+coPurchaseMeta <-subset(filteredRawData, SalesRank > 0 & SalesRank < 100000)
+coPurchaseMeta <- coPurchaseMeta[order(coPurchaseMeta$NodeId), ]
+coPurchaseMeta$NodeId <- as.character(coPurchaseMeta$NodeId)
+head(coPurchaseMeta)
+```
+
+#### Export meta file
+
+```{r}
+write.csv(coPurchaseMeta, "amazon_meta.csv", row.names = FALSE)
+```
+
+
+```{r}
+originalEdgeList <- read.delim("Dataset/Amazon0601.txt", header = FALSE, comment.char = "#")
+colnames(originalEdgeList) <- c("FromNodeId", "ToNodeId")
+```
+
+```{r}
+coPurchaseEdgeList <- subset(originalEdgeList, (FromNodeId %in% coPurchaseMeta$NodeId) & (ToNodeId %in% coPurchaseMeta$NodeId) )
+```
+
+#### Export edgelist [Copurchase]
+
+```{r}
+write.csv(coPurchaseEdgeList, "coPurchaseEdgeList.csv", row.names = FALSE)
+```
+
+
+```{r}
+coPurchaseMetaNew <-subset(coPurchaseMeta, (NodeId %in% coPurchaseEdgeList$FromNodeId) | (NodeId %in% coPurchaseEdgeList$ToNodeId) )
+coPurchaseMetaNew$NodeId <- as.character(coPurchaseMetaNew$NodeId)
+
+write.csv(coPurchaseMetaNew, "coPurchaseMetaNew.csv", row.names = FALSE)
+```
+
+## Analysis
+
+#### Graph Creation
+
+```{r}
+coPurchaseNetworkGraph <- graph.data.frame(d = coPurchaseEdgeList, directed = FALSE)
+```
+
+```{r}
+summary(coPurchaseNetworkGraph)
+```
+
+```{r}
+nodes <- vcount(coPurchaseNetworkGraph)
+edges <- ecount(coPurchaseNetworkGraph)
+```
+
+
+```{r}
+nodes
+edges
+```
+
+```{r}
+edg <- coPurchaseNetworkGraph
+#edg <- graph.data.frame(edg)
+V(edg)$color <- "yellow"
+
+E(edg)$width <- 0.01
+plot.igraph(edg, vertex.color = V(edg)$color, edge.width=E(edg)$width, edge.color = "Light green")
+```
+
+
+
+```{r}
+avg_degree <-  mean(degree(coPurchaseNetworkGraph, mode = 'total', loops = FALSE))
+avg_degree
+
+```
+
+```{r}
+density <- edge_density(coPurchaseNetworkGraph, loops = F)
+density
+
+```
+
+```{r}
+
+diameter <- diameter(coPurchaseNetworkGraph, directed = F, weights = NA)
+diameter
+```
+
+```{r}
+mean_dist <- mean_distance(coPurchaseNetworkGraph, directed = F)
+mean_dist
+```
+
+```{r}
+betweenss <- betweenness(coPurchaseNetworkGraph, directed = F, weights = NA)
+closenss <- closeness(coPurchaseNetworkGraph, mode = "all", weights = NA)
+```
+
+
+```{r}
+eigen_cent <- eigen_centrality(coPurchaseNetworkGraph, directed = F, weights = NA)
+
+```
+
+
+```{r}
+assortativity <- assortativity_degree(coPurchaseNetworkGraph, directed = F)
+assortativity
+
+```
+
+
+```{r}
+transitivity <-  transitivity(coPurchaseNetworkGraph, type = "undirected")
+transitivity
+```
+
+
+```{r}
+categories<-data.frame(table(coPurchaseMetaNew$Category))
+categories$contribution<-categories$Freq*100/sum(categories$Freq)
+
+ratings<-ddply(coPurchaseMetaNew,c(7),summarise,books=length(NodeId),sr=mean(SalesRank),minSR=min(SalesRank),maxsr=max(SalesRank))
+ratings$contr<-ratings$books*100/sum(ratings$books)
+```
+
+```{r}
+fig <- categories %>% plot_ly(labels = ~Var1, values = ~Freq)
+fig <- fig %>% add_pie(hole = 0.6)
+fig <- fig %>% layout(title = "Categories Shares",  showlegend = F,
+                      xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+                      yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+fig
+```
+
+### Community Detection
+
+```{r}
+coPurchaseMeta <- read.csv("coPurchaseMetaNew.csv")
+coPurchaseEdgeList<-read.csv("coPurchaseEdgeList.csv")
+
+cp1<-merge(coPurchaseEdgeList,coPurchaseMeta[,c(1,7)],by.x="ToNodeId",by.y="NodeId")
+cp2<-merge(cp1,coPurchaseMeta[,c(1,7)],by.x="FromNodeId",by.y="NodeId")
+cp2$weight<-(cp2$AverageRating.x+cp2$AverageRating.y)/2
+coPurchaseEdgeList<-cp2[,c("FromNodeId","ToNodeId","weight")]
+head(coPurchaseEdgeList)
+```
+
+```{r}
+coPurchaseNetworkGraph <- graph.data.frame(d = coPurchaseEdgeList, vertices = coPurchaseMeta,directed = F) 
+```
+
+```{r}
+#Leading Eigen Vector
+clus_eigen <- cluster_leading_eigen(as.undirected(coPurchaseNetworkGraph), weights = E(coPurchaseNetworkGraph)$weight, options = list(maxiter=1000000))
+mod_eigen <- modularity(as.undirected(coPurchaseNetworkGraph), membership(clus_eigen), weight = E(coPurchaseNetworkGraph)$weight)
+```
+
+```{r}
+#INFOMAP
+clus_info <- cluster_infomap(coPurchaseNetworkGraph, e.weights = E(coPurchaseNetworkGraph)$weight)
+mod_info <- modularity( coPurchaseNetworkGraph, membership(clus_info), weight = E(coPurchaseNetworkGraph)$weight)
+```
+
+```{r}
+#FAST GREEDY
+simplifyG <- simplify(coPurchaseNetworkGraph)
+clus_fast <- cluster_fast_greedy(simplifyG, weight = E(simplifyG)$weight)
+mod_fast <- modularity( simplifyG, membership(clus_fast), weight = E(simplifyG)$weight )
+```
+
+```{r}
+#LOUVAIN
+clus_louvain <- cluster_louvain(coPurchaseNetworkGraph, weights = E(coPurchaseNetworkGraph)$weight)
+mod_louvain <- modularity( coPurchaseNetworkGraph, membership(clus_louvain), weight = E(coPurchaseNetworkGraph)$weight)
+```
+
+```{r}
+algo_vec <- as.vector(c("clus_fast", "clus_eigen", "clus_info", "clus_louvain"))
+mod_vec <- as.vector(c("mod_fast", "mod_eigen", "mod_info", "mod_louvain"))
+algo_metrics <- data.frame( algo = as.character(), community_count = as.numeric(), modularity = as.numeric())
+```
+
+```{r}
+for (i in 1:4) {
+  algo_metrics[i, "algo"] <- algorithm(get(algo_vec[i]))
+  algo_metrics[i, "community_count"] <- length(get(algo_vec[i]))
+  algo_metrics[i, "modularity"] <- get(mod_vec[i])
+}
+```
+
+
+
+```{r}
+hc1 <- algo_metrics %>%
+  hchart('column', hcaes(x = algo, y = community_count),
+         color = "#148F77", borderColor = "#58D68D")
+
+hc1
+```
+
+```{r}
+hc2 <- algo_metrics %>%
+  hchart('column', hcaes(x = algo, y = modularity),
+         color = "#F1C40F", borderColor = "#E74C3C")
+
+hc2
+```
+
+```{r}
+V(coPurchaseNetworkGraph)$community <- membership(clus_louvain)
+```
+
+```{r}
+communities_louvain <- communities(clus_louvain)
+temp <- data.frame(Node = as.character(), Community = as.character())
+node_comm <- data.frame(Node = as.character(), Community = as.character())
+```
+
+
+## Mapping 
+
+```{r}
+
+for (i in 1:length(communities_louvain)) {
+  for (j in 1:length(communities_louvain[[i]])) {
+    temp[1, 1] <- communities_louvain[[i]][j]
+    temp[1, 2] <- i
+    node_comm <- rbind(node_comm, temp)
+  }
+}
+```
+
+
+```{r}
+node_strength <-data.frame(strength(coPurchaseNetworkGraph,vids = V(coPurchaseNetworkGraph),mode = "total",loops = FALSE,weights = E(coPurchaseNetworkGraph)$weight))
+colnames(node_strength) <- "strength"
+node_strength <- tibble::rownames_to_column(node_strength, "Node")
+```
+
+
+```{r}
+node_community_strength <- merge(node_comm, node_strength, by = "Node")
+
+#Sort and rank the communities by decreasing strength
+community_strength <- ddply(node_community_strength, c("Community"), summarise, mean_strength = mean(strength), nodes = length(Node))
+community_strength$importance <- community_strength$mean_strength * community_strength$nodes
+community_strength <- community_strength[order(community_strength$importance, decreasing = T), ]
+community_strength$Rank <- 1:nrow(community_strength)
+
+head(community_strength)
+```
+
+```{r}
+write.csv(node_community_strength,"node_community_strength.csv",row.names=F)
+head(node_community_strength)
+```
+
+```{r}
+coPurchaseMeta <- read.csv("coPurchaseMetaNew.csv")
+coPurchaseEdgeList<-read.csv("coPurchaseEdgeList.csv")
+node_comm_strength<-read.csv("node_community_strength.csv")
+```
+
+```{r}
+rec_raw <- merge( coPurchaseMeta, node_comm_strength, by.x = "NodeId", by.y = "Node", all.x = T)
+head(rec_raw)
+```
+
+```{r}
+source("Recommendation.R")
+
+```
+
+```{r}
+communityMembership1 = as.numeric(rec_raw[rec_raw$NodeId == 9954, "Community"])
+subv1 <- rec_raw[rec_raw$Community == communityMembership1, 1]
+communityGraph1 <- induced.subgraph(coPurchaseNetworkGraph, vids = as.character(subv1))
+communityGraph1 <- as.data.frame(get.edgelist(communityGraph1))
+```
+`
+
+```{r}
+p <- simpleNetwork(communityGraph1, height="100px", width="100px")
+p
+```
+
+***
+
+```{r}
+RecommendedBooks <- BookRecommendation(9954)
+write.csv(RecommendedBooks,"RecommendedBooks9954.csv")
+
+```
+
+```{r}
+n200<-coPurchaseMeta[sample(nrow(coPurchaseMeta), 200), ]
+Rec200<-data.frame()
+temp<-data.frame()
+```
+
+```{r}
+for(i in 1: length(n200)){
+  
+  temp <- BookRecommendation(n200$NodeId[i])
+  temp$For <- n200$NodeId[i]
+  Rec200<-rbind(Rec200,temp)
+}
+```
+
+```{r}
+Rec1<-merge(Rec200[,c(1:3,8)],rec_raw[,c(1:3,9)],by.x=c(4),by.y=c(1),all.x=T)
+Rec2<-merge(Rec1,rec_raw[,c(1,9)],by.x=c(2),by.y=c(1),all.x=T)
+colnames(Rec2)<-c("RecNode","ForNode","RecTitle","RecCat","ForTitle","ForCat","ForCom","RecCom")
+Recommendation<-Rec2[Rec2$RecNode!=Rec2$ForNode,c(2,5:7,1,3:4,8)]
+
+write.csv(Recommendation,"Recommendation.csv")
+```
+
